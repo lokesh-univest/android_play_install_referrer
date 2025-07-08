@@ -72,7 +72,15 @@ class AndroidPlayInstallReferrerPlugin : FlutterPlugin, MethodCallHandler {
                         handleOnInstallReferrerSetupFinished(responseCode)
                     }
 
-                    override fun onInstallReferrerServiceDisconnected() {}
+                    override fun onInstallReferrerServiceDisconnected() {
+                        // Handle service disconnection
+                        synchronized(this@AndroidPlayInstallReferrerPlugin) {
+                            if (!isInstallReferrerResolved) {
+                                referrerError = Pair("SERVICE_DISCONNECTED", "Install Referrer service was disconnected")
+                                resolvePendingInstallReferrerResults()
+                            }
+                        }
+                    }
                 })
             }
         }
@@ -82,10 +90,34 @@ class AndroidPlayInstallReferrerPlugin : FlutterPlugin, MethodCallHandler {
     private fun handleOnInstallReferrerSetupFinished(responseCode: Int) {
         when (responseCode) {
             InstallReferrerClient.InstallReferrerResponse.OK -> {
-                referrerClient?.let {
-                    referrerDetails = it.installReferrer
-                } ?: run {
-                    referrerError = Pair("BAD_STATE", "Result is null.")
+                try {
+                    referrerClient?.let { client ->
+                        // Add null check and exception handling
+                        val details = client.installReferrer
+                        if (details != null) {
+                            referrerDetails = details
+                        } else {
+                            referrerError = Pair("BAD_STATE", "Install referrer details are null")
+                        }
+                    } ?: run {
+                        referrerError = Pair("BAD_STATE", "Install referrer client is null")
+                    }
+                } catch (e: Exception) {
+                    // Handle DeadObjectException and other potential exceptions
+                    when (e) {
+                        is android.os.DeadObjectException -> {
+                            referrerError = Pair("SERVICE_DEAD", "Install Referrer service connection is dead")
+                        }
+                        is SecurityException -> {
+                            referrerError = Pair("PERMISSION_ERROR", "Security exception: ${e.message}")
+                        }
+                        is IllegalStateException -> {
+                            referrerError = Pair("BAD_STATE", "Illegal state: ${e.message}")
+                        }
+                        else -> {
+                            referrerError = Pair("UNKNOWN_ERROR", "Unexpected error: ${e.message}")
+                        }
+                    }
                 }
             }
             InstallReferrerClient.InstallReferrerResponse.SERVICE_DISCONNECTED -> {
@@ -104,12 +136,18 @@ class AndroidPlayInstallReferrerPlugin : FlutterPlugin, MethodCallHandler {
                 referrerError = Pair("PERMISSION_ERROR", "App is not allowed to bind to the Service.")
             }
             else -> {
-                referrerError = Pair("UNKNOWN_ERROR", "InstallReferrerClient returned unknown response code.")
+                referrerError = Pair("UNKNOWN_ERROR", "InstallReferrerClient returned unknown response code: $responseCode")
             }
         }
 
         resolvePendingInstallReferrerResults()
-        referrerClient?.endConnection()
+
+        // Safely end connection
+        try {
+            referrerClient?.endConnection()
+        } catch (e: Exception) {
+            // Ignore exceptions when ending connection
+        }
     }
 
     @Synchronized
@@ -123,18 +161,24 @@ class AndroidPlayInstallReferrerPlugin : FlutterPlugin, MethodCallHandler {
     @Synchronized
     private fun resolveInstallReferrerResult(@NonNull result: Result) {
         referrerDetails?.let {
-            result.success(
-                mapOf(
-                    "installReferrer" to it.installReferrer,
-                    "referrerClickTimestampSeconds" to it.referrerClickTimestampSeconds,
-                    "installBeginTimestampSeconds" to it.installBeginTimestampSeconds,
-                    "referrerClickTimestampServerSeconds" to it.referrerClickTimestampServerSeconds,
-                    "installBeginTimestampServerSeconds" to it.installBeginTimestampServerSeconds,
-                    "installVersion" to it.installVersion,
-                    "googlePlayInstantParam" to it.googlePlayInstantParam
+            try {
+                result.success(
+                    mapOf(
+                        "installReferrer" to it.installReferrer,
+                        "referrerClickTimestampSeconds" to it.referrerClickTimestampSeconds,
+                        "installBeginTimestampSeconds" to it.installBeginTimestampSeconds,
+                        "referrerClickTimestampServerSeconds" to it.referrerClickTimestampServerSeconds,
+                        "installBeginTimestampServerSeconds" to it.installBeginTimestampServerSeconds,
+                        "installVersion" to it.installVersion,
+                        "googlePlayInstantParam" to it.googlePlayInstantParam
+                    )
                 )
-            )
-            return
+                return
+            } catch (e: Exception) {
+                // If we can't access the referrer details, treat it as an error
+                result.error("ACCESS_ERROR", "Could not access referrer details: ${e.message}", null)
+                return
+            }
         }
         referrerError?.let {
             result.error(it.first, it.second, null)
